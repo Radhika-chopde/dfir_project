@@ -36,13 +36,13 @@ def verify_signature(file_path):
         print(f"Error reading file signature: {e}")
         return "Error"
     
-def save_to_db(agent_name, finding_type, description):
+def save_to_db(agent_name, finding_type, description, investigation_id):
     conn = None
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        sql = "INSERT INTO findings (agent_name, finding_type, description) VALUES (%s, %s, %s);"
-        cur.execute(sql,(agent_name,finding_type,description))
+        sql = "INSERT INTO findings (agent_name, finding_type, description, investigation_id) VALUES (%s, %s, %s, %s);"
+        cur.execute(sql,(agent_name,finding_type,description, investigation_id))
         conn.commit()
         cur.close()
     except Exception as e:
@@ -54,9 +54,10 @@ def save_to_db(agent_name, finding_type, description):
 @app.route('/verify_signature', methods=['POST'])
 def verify_signature_endpoint():
     data = request.get_json()
-    if not data or 'file_path' not in data:
+    if not data or 'file_path' not in data or 'investigation_id' not in data:
         return jsonify({"error":"Missing 'file_path' "}), 400
     file_path = data['file_path']
+    investigation_id = data['investigation_id']
     file_extension = os.path.splitext(file_path)[1].lower()
     detected_type = verify_signature(file_path)
     if detected_type is None:
@@ -65,7 +66,7 @@ def verify_signature_endpoint():
     if (detected_type == "JPEG" and file_extension not in ['.jpeg','.jpg']) or (detected_type=='PNG' and file_extension != '.png') or (detected_type == 'PDF' and file_extension != '.pdf') or (detected_type == 'ZIP' and file_extension != '.zip') or (detected_type == 'EXE' and file_extension!='.exe'):
         is_mismatch = True
         description = f"File Signature Mismatch! File '{file_path}' has extetension '{file_extension}' but is detected as a '{detected_type}' file."
-        save_to_db("Signature Agent","Signature Mismatch", description)
+        save_to_db("Signature Agent","Signature Mismatch", description=description, investigation_id=investigation_id)
     return jsonify(
         {
             "file": file_extension,

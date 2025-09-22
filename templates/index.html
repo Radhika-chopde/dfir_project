@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DFIR Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #111827; color: #E5E7EB; }
+        .table-container { max-height: 65vh; }
+    </style>
+</head>
+<body class="p-8 font-sans">
+    <div class="max-w-7xl mx-auto">
+        <h1 class="text-4xl font-bold text-white mb-2">DFIR Multi-Agent System</h1>
+        <p class="text-gray-400 mb-8">Live feed of findings from all forensic agents.</p>
+
+        <div class="bg-gray-900 p-6 rounded-lg shadow-lg mb-8">
+            <h2 class="text-2xl font-semibold text-white mb-4">Start New Investigation</h2>
+            <form id="analysisForm">
+                <label for="directoryPath" class="block mb-2 text-sm font-medium text-gray-300">
+                    Enter the full path of the directory on the server to analyze:
+                </label>
+                <div class="flex items-center space-x-4">
+                    <input type="text" id="directoryPath" name="directoryPath" class="bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5" placeholder="e.g., D:\DigitalForensics\Evidence" required>
+                    <button type="submit" id="startBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-6 rounded-lg transition duration-300">
+                        Start Analysis
+                    </button>
+                </div>
+            </form>
+            <div id="statusMessage" class="mt-4 text-sm text-gray-400"></div>
+        </div>
+
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-2xl font-semibold text-white">Latest Investigation Findings</h2>
+            <button id="refreshBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
+                Refresh Data
+            </button>
+        </div>
+        <div class="table-container bg-gray-900 rounded-lg shadow-lg overflow-auto">
+            <table class="min-w-full divide-y divide-gray-700">
+                <thead class="bg-gray-800 sticky top-0">
+                    <tr>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Agent Name</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Finding Type</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Description</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Timestamp</th>
+                    </tr>
+                </thead>
+                <tbody id="findingsTableBody" class="bg-gray-900 divide-y divide-gray-800">
+                    <tr><td colspan="4" class="text-center p-8 text-gray-500">Loading findings...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const tableBody = document.getElementById('findingsTableBody');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const analysisForm = document.getElementById('analysisForm');
+        const directoryPathInput = document.getElementById('directoryPath');
+        const statusMessage = document.getElementById('statusMessage');
+
+        async function fetchFindings() {
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/findings/latest');
+                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                const findings = await response.json();
+                
+                tableBody.innerHTML = '';
+                if (findings.length === 0) {
+                    tableBody.innerHTML = '<tr><td colspan="4" class="text-center p-8 text-gray-500">No findings in the database yet.</td></tr>';
+                    return;
+                }
+                findings.forEach(finding => {
+                    const row = `
+                        <tr class="hover:bg-gray-800">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-white">${finding.agent_name}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">${finding.finding_type}</td>
+                            <td class="px-6 py-4 whitespace-normal text-sm text-gray-300 break-words">${finding.description}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">${new Date(finding.timestamp).toLocaleString()}</td>
+                        </tr>
+                    `;
+                    tableBody.innerHTML += row;
+                });
+            } catch (error) {
+                console.error("Failed to fetch findings:", error);
+                tableBody.innerHTML = `<tr><td colspan="4" class="text-center p-8 text-red-400">Error loading data.</td></tr>`;
+            }
+        }
+
+        analysisForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const path = directoryPathInput.value.trim();
+            if (!path) return;
+            statusMessage.textContent = `Starting analysis on "${path}"...`;
+            statusMessage.className = 'mt-4 text-sm text-yellow-400';
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/start_analysis', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ directory_path: path })
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error);
+                statusMessage.textContent = `${result.message}. Refresh to see results.`;
+                statusMessage.className = 'mt-4 text-sm text-green-400';
+            } catch (error) {
+                statusMessage.textContent = `Error: ${error.message}`;
+                statusMessage.className = 'mt-4 text-sm text-red-400';
+            }
+        });
+
+        refreshBtn.addEventListener('click', fetchFindings);
+        document.addEventListener('DOMContentLoaded', fetchFindings);
+    </script>
+</body>
+</html>
+
