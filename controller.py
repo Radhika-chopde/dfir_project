@@ -5,9 +5,9 @@ import requests
 HASH_AGENT_URL = "http://127.0.0.1:5001/analyze_file"
 KEYWORD_AGENT_URL = "http://127.0.0.1:5002/search_keywords"
 FILE_SIGNATURE_AGENT_URL = "http://127.0.0.1:5003/verify_signature"
+TIMELINE_AGENT_URL = "http://127.0.0.1:5004/get_timestamps"
 
 def main():
-    """Main function to control the investigation."""
     if len(sys.argv) < 3:
         print("Usage: python controller.py <directory_to_analyze> <investigation_id>")
         return
@@ -59,6 +59,13 @@ def main():
             print("  - Signature Agent Response:", response.json())
         except requests.exceptions.ConnectionError:
             print("  - [!] Error connecting to Signature Agent.")
+
+        try:
+            timeline_payload = {"file_path": file_path, "investigation_id": investigation_id}
+            response = requests.post(TIMELINE_AGENT_URL, json=timeline_payload)
+            print(" - Timeline Agent Response:",response.json())
+        except requests.exceptions.ConnectionError:
+            print(" - [!] Error connecting to Timeline Agent.")
 
     print(f"\n--- Controller finished investigation [{investigation_id}]. ---")
 
