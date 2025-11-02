@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raw Log Viewer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        td {
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-900 min-h-screen">
+
+    <nav class="bg-white p-4 shadow-md sticky top-0 z-10 border-b border-gray-200">
+        <div class="container mx-auto flex justify-between items-center">
+            <div>
+                <h1 class="text-2xl font-bold text-purple-600">Raw Investigation Log</h1>
+                <p class="text-gray-600 text-sm">ID: <span id="investigation-id">{{ investigation_id }}</span></p>
+            </div>
+            <a href="/report" 
+               class="text-sm bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg transition font-medium">
+                Back to Report
+            </a>
+        </div>
+    </nav>
+
+    <div class="container mx-auto p-4 md:p-8">
+        <div class="bg-white p-6 rounded-2xl shadow-lg border border-gray-200">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">File Path</th>
+                        <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Description</th>
+                    </tr>
+                </thead>
+                <tbody id="log-table-body" class="bg-white divide-y divide-gray-200">
+                    <tr>
+                        <td colspan="5" class="px-4 py-4 text-center text-gray-500">Loading log data...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const tableBody = document.getElementById('log-table-body');
+        
+        async function fetchLog() {
+            try {
+                const response = await fetch('/api/findings/latest'); 
+                if (!response.ok) {
+                    throw new Error('Failed to load log data.');
+                }
+                const data = await response.json();
+                
+                if (data.length > 0) {
+                    tableBody.innerHTML = ''; 
+                    
+                    data.forEach(finding => {
+                        const row = `
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-600">${new Date(finding.timestamp).toLocaleTimeString()}</td>
+                                <td class="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${finding.agent_name}</td>
+                                <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-600">${finding.finding_type}</td>
+                                <td class="px-4 py-4 text-sm text-gray-600">${finding.file_path || 'N/A'}</td>
+                                <td class="px-4 py-4 text-sm text-gray-600">${finding.description}</td>
+                            </tr>
+                        `;
+                        tableBody.innerHTML += row;
+                    });
+                } else {
+                    tableBody.innerHTML = '<tr><td colspan="5" class="px-4 py-4 text-center text-gray-500">No log data found for the latest investigation.</td></tr>';
+                }
+            } catch (error) { 
+                console.error(error);
+                tableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-4 text-center text-red-600">Error loading log data.</td></tr>`;
+            }
+        }
+
+        fetchLog();
+    </script>
+</body>
+</html>
+

@@ -3,117 +3,82 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DFIR Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <title>DFIR Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { background-color: #111827; color: #E5E7EB; }
-        .table-container { max-height: 65vh; }
+        body { font-family: 'Inter', sans-serif; }
     </style>
 </head>
-<body class="p-8 font-sans">
-    <div class="max-w-7xl mx-auto">
-        <h1 class="text-4xl font-bold text-white mb-2">DFIR Multi-Agent System</h1>
-        <p class="text-gray-400 mb-8">Live feed of findings from all forensic agents.</p>
+<body class="bg-gray-100 text-gray-900 min-h-screen flex items-center justify-center">
 
-        <div class="bg-gray-900 p-6 rounded-lg shadow-lg mb-8">
-            <h2 class="text-2xl font-semibold text-white mb-4">Start New Investigation</h2>
-            <form id="analysisForm">
-                <label for="directoryPath" class="block mb-2 text-sm font-medium text-gray-300">
-                    Enter the full path of the directory on the server to analyze:
-                </label>
-                <div class="flex items-center space-x-4">
-                    <input type="text" id="directoryPath" name="directoryPath" class="bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full p-2.5" placeholder="e.g., D:\DigitalForensics\Evidence" required>
-                    <button type="submit" id="startBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-6 rounded-lg transition duration-300">
-                        Start Analysis
-                    </button>
-                </div>
-            </form>
-            <div id="statusMessage" class="mt-4 text-sm text-gray-400"></div>
-        </div>
+    <div class="bg-white p-8 md:p-12 rounded-2xl shadow-lg w-full max-w-2xl mx-4 border border-gray-200">
+        <h1 class="text-3xl font-bold text-center text-gray-900 mb-2">
+            Live Folder Analysis for Digital Forensics 
+        </h1>
+        <p class="text-center text-gray-600 mb-8">
+            Start a new investigation by providing a folder path.
+        </p>
 
-        <div class="flex justify-between items-center mb-4">
-            <h2 class="text-2xl font-semibold text-white">Latest Investigation Findings</h2>
-            <button id="refreshBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
-                Refresh Data
+        <div class="space-y-4">
+            <div>
+                <label for="directory_path" class="block text-sm font-medium text-gray-700 mb-1">Folder to Analyze</label>
+                <input type="text" id="directory_path" 
+                       class="w-full bg-white border border-gray-300 text-gray-900 rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                       placeholder="e.g., C:\Users\user\Downloads">
+            </div>
+            
+            <button id="start-button" onclick="startAnalysis()" 
+                    class="w-full bg-purple-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg shadow-lg 
+                           transition duration-300 ease-in-out transform hover:-translate-y-0.5
+                           focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                Start Analysis
             </button>
         </div>
-        <div class="table-container bg-gray-900 rounded-lg shadow-lg overflow-auto">
-            <table class="min-w-full divide-y divide-gray-700">
-                <thead class="bg-gray-800 sticky top-0">
-                    <tr>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Agent Name</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Finding Type</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Description</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Timestamp</th>
-                    </tr>
-                </thead>
-                <tbody id="findingsTableBody" class="bg-gray-900 divide-y divide-gray-800">
-                    <tr><td colspan="4" class="text-center p-8 text-gray-500">Loading findings...</td></tr>
-                </tbody>
-            </table>
-        </div>
+
+        <div id="status-message" class="mt-6 text-center"></div>
     </div>
 
     <script>
-        const tableBody = document.getElementById('findingsTableBody');
-        const refreshBtn = document.getElementById('refreshBtn');
-        const analysisForm = document.getElementById('analysisForm');
-        const directoryPathInput = document.getElementById('directoryPath');
-        const statusMessage = document.getElementById('statusMessage');
+        const pathInput = document.getElementById('directory_path');
+        const startButton = document.getElementById('start-button');
+        const statusMessage = document.getElementById('status-message');
 
-        async function fetchFindings() {
-            try {
-                const response = await fetch('http://127.0.0.1:8000/api/findings/latest');
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const findings = await response.json();
-                
-                tableBody.innerHTML = '';
-                if (findings.length === 0) {
-                    tableBody.innerHTML = '<tr><td colspan="4" class="text-center p-8 text-gray-500">No findings in the database yet.</td></tr>';
-                    return;
-                }
-                findings.forEach(finding => {
-                    const row = `
-                        <tr class="hover:bg-gray-800">
-                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-white">${finding.agent_name}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">${finding.finding_type}</td>
-                            <td class="px-6 py-4 whitespace-normal text-sm text-gray-300 break-words">${finding.description}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">${new Date(finding.timestamp).toLocaleString()}</td>
-                        </tr>
-                    `;
-                    tableBody.innerHTML += row;
-                });
-            } catch (error) {
-                console.error("Failed to fetch findings:", error);
-                tableBody.innerHTML = `<tr><td colspan="4" class="text-center p-8 text-red-400">Error loading data.</td></tr>`;
+        async function startAnalysis() {
+            const directoryPath = pathInput.value;
+            if (!directoryPath) {
+                statusMessage.innerHTML = `<span class="text-red-600">Please enter a directory path.</span>`;
+                return;
             }
-        }
 
-        analysisForm.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            const path = directoryPathInput.value.trim();
-            if (!path) return;
-            statusMessage.textContent = `Starting analysis on "${path}"...`;
-            statusMessage.className = 'mt-4 text-sm text-yellow-400';
+            // Show loading state
+            startButton.disabled = true;
+            startButton.innerText = 'Starting...';
+            statusMessage.innerHTML = `<span class="text-blue-600">Initializing analysis...</span>`;
+
             try {
-                const response = await fetch('http://127.0.0.1:8000/api/start_analysis', {
+                const response = await fetch('/api/start_analysis', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ directory_path: path })
+                    body: JSON.stringify({ directory_path: directoryPath })
                 });
-                const result = await response.json();
-                if (!response.ok) throw new Error(result.error);
-                statusMessage.textContent = `${result.message}. Refresh to see results.`;
-                statusMessage.className = 'mt-4 text-sm text-green-400';
-            } catch (error) {
-                statusMessage.textContent = `Error: ${error.message}`;
-                statusMessage.className = 'mt-4 text-sm text-red-400';
-            }
-        });
 
-        refreshBtn.addEventListener('click', fetchFindings);
-        // document.addEventListener('DOMContentLoaded', fetchFindings);
+                const result = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(result.error || 'Unknown error occurred');
+                }
+                statusMessage.innerHTML = `<span class="text-green-600">Analysis started! Redirecting to report...</span>`;
+                setTimeout(() => {
+                    window.location.href = '/report';
+                }, 1500);
+
+            } catch (error) {
+                statusMessage.innerHTML = `<span class="text-red-600">Error: ${error.message}</span>`;
+                startButton.disabled = false;
+                startButton.innerText = 'Start Analysis';
+            }
+        }
     </script>
+
 </body>
 </html>
-

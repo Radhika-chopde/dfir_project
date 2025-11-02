@@ -16,7 +16,7 @@ def search_keyword_in_file(file_path, keywords):
     found_lines = []
     try:
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line_num, line in enumerate(f,1):
+            for line_num, line in enumerate(f, 1):
                 for keyword in keywords:
                     if keyword.lower() in line.lower():
                         found_lines.append(f"L{line_num}: {line.strip()}")
@@ -28,13 +28,16 @@ def search_keyword_in_file(file_path, keywords):
         return []
     return found_lines
 
-def save_to_db(agent_name, finding_type, description, investigation_id):
+def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
     conn = None
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        sql = "INSERT INTO FINDINGS (agent_name,finding_type,description,investigation_id) VALUES (%s, %s, %s, %s)"
-        cur.execute(sql,(agent_name,finding_type,description,investigation_id))
+        sql = """
+            INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) 
+            VALUES (%s, %s, %s, %s, %s);
+        """
+        cur.execute(sql,(agent_name, finding_type, description, investigation_id, file_path))
         conn.commit()
         cur.close()
         print("Successfully saved finding to the database.")
@@ -44,22 +47,32 @@ def save_to_db(agent_name, finding_type, description, investigation_id):
         if conn is not None:
             conn.close()
 
-#API Endpoint
 @app.route('/search_keywords', methods=['POST'])
 def search_keywords_endpoint():
     data = request.get_json()
     if not data or 'file_path' not in data or 'keywords' not in data or 'investigation_id' not in data:
         return jsonify({"error": "Missing 'file_path' or 'keywords' or 'investigation_id' in request"}), 400
+    
     file_path = data['file_path']
     keywords = data['keywords']
     investigation_id = data['investigation_id']
+    
     matching_lines = search_keyword_in_file(file_path, keywords)
+    
     if matching_lines is None:
         return jsonify({"error": "File not found"}), 404
+        
     if matching_lines:
         for line in matching_lines:
             description = f"Found keyword in '{file_path}'. Details: {line}"
-            save_to_db(agent_name="KeywordAgent", finding_type="Keyword Hit", description=description, investigation_id=investigation_id)
+
+            save_to_db(
+                agent_name="KeywordAgent", 
+                finding_type="Keyword Hit", 
+                description=description, 
+                investigation_id=investigation_id,
+                file_path=file_path
+            )
         return jsonify({"message": "Keyword Search complete", "file": file_path, "matches_found": len(matching_lines)}), 200
     else:
         return jsonify({"message": "Keyword search complete", "file": file_path, "matches_found": 0}), 200
