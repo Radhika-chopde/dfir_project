@@ -1,5 +1,6 @@
 import os
 import psycopg2
+import re
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -12,21 +13,75 @@ DB_CONFIG = {
     "port": "5432"
 }
 
-def search_keyword_in_file(file_path, keywords):
-    found_lines = []
+# --- ADVANCED FORENSIC KEYWORD LIBRARY ---
+# Categorized patterns used to identify malicious intent or sensitive data exposure.
+# Using Regex allows us to catch patterns (like SSNs) rather than just static words.
+FORENSIC_LIBRARY = {
+    "PII_Confidential": [
+        r"\b\d{3}-\d{2}-\d{4}\b",                             # Social Security Numbers
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", # Email addresses
+        r"(?i)(password|secret|confidential|private_key|ssh-rsa|access_token)"
+    ],
+    "WebShell_Hacking": [
+        r"(?i)(eval\(|base64_decode\(|shell_exec\(|system\(|passthru\(|exec\()", # Dangerous PHP/Python functions
+        r"(?i)(cmd\.exe|/bin/sh|/bin/bash|powershell\.exe -enc|nc -e|ncat -e)"   # Reverse shell indicators
+    ],
+    "Persistence_Discovery": [
+        r"(?i)(schtasks|reg add|net user|net localgroup|whoami|netstat -anob|tasklist|attrib \+h)"
+    ],
+    "Malware_Artifacts": [
+        r"(?i)(mimikatz|cobaltstrike|metasploit|meterpreter|beacon|backdoor|exploit|payload)"
+    ]
+}
+
+def search_forensic_patterns(file_path, custom_keywords=None):
+    """
+    Scans a file using the high-level forensic library 
+    and optional user-defined keywords.
+    """
+    found_hits = []
+    
+    # 1. Prepare patterns
+    all_patterns = []
+    for category, patterns in FORENSIC_LIBRARY.items():
+        for p in patterns:
+            all_patterns.append((category, p))
+    
+    # Add any extra keywords provided by the controller
+    if custom_keywords:
+        for k in custom_keywords:
+            all_patterns.append(("User Defined", re.escape(k)))
+
     try:
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            for line_num, line in enumerate(f, 1):
-                for keyword in keywords:
-                    if keyword.lower() in line.lower():
-                        found_lines.append(f"L{line_num}: {line.strip()}")
-                        break
-    except FileNotFoundError:
-        return None
+        # Read as bytes to prevent crashing on non-UTF-8 binary data
+        with open(file_path, 'rb') as f:
+            # Read first 2MB to maintain performance during rapid triage
+            raw_data = f.read(2 * 1024 * 1024)
+            content = raw_data.decode('utf-8', errors='ignore')
+            
+            for category, pattern in all_patterns:
+                matches = re.finditer(pattern, content)
+                for match in matches:
+                    # Capture 20 chars of context for the investigator
+                    start = max(0, match.start() - 20)
+                    end = min(len(content), match.end() + 20)
+                    context = content[start:end].replace('\n', ' ').strip()
+                    
+                    found_hits.append({
+                        "category": category,
+                        "match": match.group(),
+                        "context": f"...{context}..."
+                    })
+                    
+                    # Limit to 10 hits per file to avoid database bloat
+                    if len(found_hits) >= 10:
+                        return found_hits
+                        
     except Exception as e:
-        print(f"Error reading file {file_path}: {e}")
+        print(f"Error scanning {file_path}: {e}")
         return []
-    return found_lines
+        
+    return found_hits
 
 def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
     conn = None
@@ -37,34 +92,34 @@ def save_to_db(agent_name, finding_type, description, investigation_id, file_pat
             INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) 
             VALUES (%s, %s, %s, %s, %s);
         """
-        cur.execute(sql,(agent_name, finding_type, description, investigation_id, file_path))
+        cur.execute(sql, (agent_name, finding_type, description, investigation_id, file_path))
         conn.commit()
         cur.close()
-        print("Successfully saved finding to the database.")
     except Exception as e:
         print(f"Database error: {e}")
     finally:
-        if conn is not None:
-            conn.close()
+        if conn: conn.close()
 
 @app.route('/search_keywords', methods=['POST'])
 def search_keywords_endpoint():
     data = request.get_json()
-    if not data or 'file_path' not in data or 'keywords' not in data or 'investigation_id' not in data:
-        return jsonify({"error": "Missing 'file_path' or 'keywords' or 'investigation_id' in request"}), 400
+    if not data or 'file_path' not in data or 'investigation_id' not in data:
+        return jsonify({"error": "Missing 'file_path' or 'investigation_id'"}), 400
     
     file_path = data['file_path']
-    keywords = data['keywords']
     investigation_id = data['investigation_id']
+    custom_keywords = data.get('keywords', [])
     
-    matching_lines = search_keyword_in_file(file_path, keywords)
+    hits = search_forensic_patterns(file_path, custom_keywords)
     
-    if matching_lines is None:
-        return jsonify({"error": "File not found"}), 404
-        
-    if matching_lines:
-        for line in matching_lines:
-            description = f"Found keyword in '{file_path}'. Details: {line}"
+    if hits:
+        # Deduplicate matches and group by category for the report
+        categories_found = set(h['category'] for h in hits)
+        for cat in categories_found:
+            cat_matches = list(set(h['match'] for h in hits if h['category'] == cat))
+            
+            description = f"[{cat}] Forensic Match: {', '.join(cat_matches[:5])}"
+            if len(cat_matches) > 5: description += " ..."
 
             save_to_db(
                 agent_name="KeywordAgent", 
@@ -73,10 +128,15 @@ def search_keywords_endpoint():
                 investigation_id=investigation_id,
                 file_path=file_path
             )
-        return jsonify({"message": "Keyword Search complete", "file": file_path, "matches_found": len(matching_lines)}), 200
+        
+        return jsonify({
+            "message": "Forensic Keyword Search complete", 
+            "file": file_path, 
+            "matches_found": len(hits),
+            "categories": list(categories_found)
+        }), 200
     else:
-        return jsonify({"message": "Keyword search complete", "file": file_path, "matches_found": 0}), 200
-
+        return jsonify({"message": "No forensic patterns detected", "file": file_path, "matches_found": 0}), 200
 
 if __name__ == '__main__':
     app.run(port=5002, debug=True)
