@@ -9,7 +9,10 @@ import threading
 import datetime
 import io
 import html 
+import psutil
+import winreg
 from psycopg2.extras import DictCursor
+
 
 # PDF Libraries
 from reportlab.lib.pagesizes import letter
@@ -289,6 +292,40 @@ def verify_integrity():
             return jsonify({"status": "tampered", "calculated": calc_root, "stored": stored['merkle_root']})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 200
+
+@app.route('/api/remediate/kill_process', methods=['POST'])
+def kill_process():
+    """Remediation: Terminate a malicious process by PID."""
+    data = request.get_json()
+    pid = data.get('pid')
+    try:
+        proc = psutil.Process(int(pid))
+        name = proc.name()
+        proc.terminate()
+        return jsonify({"message": f"Successfully terminated process {name} (PID: {pid})"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Failed to kill process: {str(e)}"}), 500
+    
+@app.route('/api/remediate/registry_wipe', methods=['POST'])
+def registry_wipe():
+    """Remediation: Delete a malicious persistence key."""
+    data = request.get_json()
+    full_path = data.get('path', '') # Expecting "HKCU\Software\...\Key"
+    try:
+        # Example logic for HKLM/HKCU splitting
+        root_str, subkey = full_path.split('\\', 1)
+        root = winreg.HKEY_LOCAL_MACHINE if "LOCAL_MACHINE" in root_str else winreg.HKEY_CURRENT_USER
+        
+        # Split key name from value
+        parent_key, value_name = os.path.split(subkey)
+        
+        with winreg.OpenKey(root, parent_key, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, value_name)
+            
+        return jsonify({"message": f"Successfully wiped persistence key: {value_name}"}), 200
+    except Exception as e:
+        return jsonify({"error": f"Registry wipe failed: {str(e)}"}), 500
+
 
 if __name__ == '__main__':
     app.run(port=8000, debug=True)
