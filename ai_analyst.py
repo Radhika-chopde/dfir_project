@@ -17,7 +17,7 @@ def get_ai_insight(file_path, findings_list):
     SELECTED_MODEL = 'phi4' 
 
     system_prompt = (
-        "You are a Senior DFIR Analyst. Analyze the following telemetry. "
+        "You are a Senior Digital Forensics and Incident Response Analyst. Analyze the following telemetry. "
         "Ground your reasoning in the provided scores. "
         "1. Map to MITRE ATT&CK (e.g., T1547). "
         "2. Explain why the behavior is suspicious. "
