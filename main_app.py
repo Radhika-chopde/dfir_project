@@ -270,6 +270,9 @@ def export_pdf():
 
 @app.route('/api/verify_integrity', methods=['POST'])
 def verify_integrity():
+    """
+    FIXED: Now captures Hardware ID to match the Controller's sealing logic.
+    """
     data = request.get_json()
     inv_id = data.get('investigation_id', '').strip()
     
@@ -277,19 +280,38 @@ def verify_integrity():
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=DictCursor)
         cur.execute("SELECT merkle_root FROM investigations WHERE investigation_id = %s", (inv_id,))
-        stored = cur.fetchone()
+        stored_res = cur.fetchone()
         
-        if not stored: return jsonify({"status": "error", "message": "ID not found"}), 200
+        if not stored_res: 
+            return jsonify({"status": "error", "message": "ID not found"}), 200
         
+        stored_root = stored_res['merkle_root']
+        
+        # Fetch findings
         cur.execute("SELECT file_path, finding_type, description FROM findings WHERE investigation_id = %s", (inv_id,))
         rows = cur.fetchall()
-        current = [{"file_path": r[0], "finding_type": r[1], "description": r[2]} for r in rows]
-        calc_root = merkle_utils.generate_investigation_integrity(current)
+        current_findings = [{"file_path": r[0], "finding_type": r[1], "description": r[2]} for r in rows]
+        
+        # CRITICAL FIX: Get the local Hardware ID to match the seal
+        hw_id = merkle_utils.get_hardware_id()
+        
+        # Recalculate with HW_ID
+        calculated_root = merkle_utils.generate_investigation_integrity(current_findings, hw_id=hw_id)
 
-        if stored['merkle_root'] == calc_root:
-            return jsonify({"status": "verified", "calculated": calc_root, "stored": stored['merkle_root']})
+        if stored_root == calculated_root:
+            return jsonify({
+                "status": "verified", 
+                "message": "Integrity Match: Verified on this hardware.", 
+                "calculated": calculated_root, 
+                "stored": stored_root
+            })
         else:
-            return jsonify({"status": "tampered", "calculated": calc_root, "stored": stored['merkle_root']})
+            return jsonify({
+                "status": "tampered", 
+                "message": "TAMPER DETECTED: Hardware binding or data modified!", 
+                "calculated": calculated_root, 
+                "stored": stored_root
+            })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 200
 

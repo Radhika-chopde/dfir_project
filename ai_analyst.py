@@ -14,7 +14,7 @@ def get_ai_insight(file_path, findings_list):
         return "No suspicious findings recorded for this artifact."
 
     # Update this to 'phi4' or 'llama3.1:8b'
-    SELECTED_MODEL = 'phi4' 
+    SELECTED_MODEL = 'llama3.1:8b' 
 
     system_prompt = (
         "You are a Senior Digital Forensics and Incident Response Analyst. Analyze the following telemetry. "
