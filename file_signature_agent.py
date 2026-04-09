@@ -1,5 +1,6 @@
 import os
 import psycopg2
+import math
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -41,6 +42,25 @@ def verify_signature(file_path):
     except Exception as e:
         print(f"Error reading file signature: {e}")
         return "Error"
+
+def calculate_entropy(file_path):
+    """Calculates Shannon Entropy to identify encrypted/packed files."""
+    try:
+        with open(file_path, 'rb') as f:
+            # Read 1MB for speed to maintain sub-120s triage time
+            data = f.read(1024 * 1024) 
+        if not data: return 0
+        
+        entropy = 0
+        for x in range(256):
+            p_x = float(data.count(x))/len(data)
+            if p_x > 0:
+                # Shannon Entropy Formula: -sum(p_i * log2(p_i))
+                entropy += - p_x * math.log(p_x, 2)
+        return entropy
+    except Exception as e:
+        print(f"Entropy Calculation Error: {e}")
+        return 0
     
 def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
     conn = None
@@ -77,8 +97,15 @@ def verify_signature_endpoint():
     if detected_type == "Error":
         return jsonify({"error": "Error reading file"}), 500
 
+    # --- NOVELTY FEATURE: Obfuscation Detection ---
+    entropy_val = calculate_entropy(file_path)
+    if entropy_val > 7.5: 
+        obs_desc = f"High Entropy Detected ({entropy_val:.2f}). File is likely encrypted or packed to evade detection."
+        save_to_db("Signature Agent", "Obfuscation Alert", obs_desc, investigation_id, file_path)
+
+    # --- Standard Signature Mismatch Logic ---
     is_mismatch = False
-    description = ""
+    mismatch_desc = ""
 
     if (detected_type == "JPEG" and file_extension not in ['.jpeg','.jpg']) or \
        (detected_type == 'PNG' and file_extension != '.png') or \
@@ -87,16 +114,17 @@ def verify_signature_endpoint():
        (detected_type == 'EXE/DLL' and file_extension not in ['.exe', '.dll', '.scr', '.com']):
         
         is_mismatch = True
-        description = f"File Signature Mismatch! File '{file_path}' has extension '{file_extension}' but is detected as a '{detected_type}' file."
+        mismatch_desc = f"File Signature Mismatch! File '{file_path}' has extension '{file_extension}' but is detected as a '{detected_type}' file."
 
     elif detected_type in ["TXT", "Unknown"] and file_extension in EXECUTABLE_EXTENSIONS:
         is_mismatch = True
-        description = f"File Signature Mismatch! File '{file_path}' has an executable extension '{file_extension}' but its signature is '{detected_type}'."
+        mismatch_desc = f"File Signature Mismatch! File '{file_path}' has an executable extension '{file_extension}' but its signature is '{detected_type}'."
+    
     if is_mismatch:
         save_to_db(
             agent_name="Signature Agent",
             finding_type="Signature Mismatch", 
-            description=description, 
+            description=mismatch_desc, 
             investigation_id=investigation_id,
             file_path=file_path
         )
@@ -106,6 +134,7 @@ def verify_signature_endpoint():
             "file": file_path,
             "extension": file_extension,
             "detected_type": detected_type,
+            "entropy": round(entropy_val, 2),
             "mismatch_found": is_mismatch
         }
     ), 200

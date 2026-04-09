@@ -101,23 +101,32 @@ def start_analysis():
 
 @app.route('/api/report/latest')
 def get_latest_report():
+    """
+    Fetches the latest investigation results and aggregates scores.
+    FIXED: Scoring logic un-indented to allow additive risk calculation.
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=DictCursor)
         
+        # 1. Fetch the most recent investigation ID
         cur.execute("SELECT investigation_id, merkle_root FROM investigations ORDER BY start_time DESC LIMIT 1;")
         res = cur.fetchone()
-        if not res: return jsonify({"artifacts": []})
+        if not res: 
+            return jsonify({"artifacts": []})
         
         inv_id = res['investigation_id']
         merkle_root = res['merkle_root'] or "CALCULATING..."
         
+        # 2. Fetch all individual findings for this investigation
         cur.execute("SELECT * FROM findings WHERE investigation_id = %s", (inv_id,))
         rows = cur.fetchall()
         
         artifacts = {}
         for r in rows:
             path = r.get('file_path') or "System/Registry Artifacts"
+            
+            # 3. INITIALIZE: Create the entry if this is the first time we see this path
             if path not in artifacts:
                 artifacts[path] = {
                     'file_path': path, 
@@ -127,27 +136,40 @@ def get_latest_report():
                     'ai_insight': r.get('ai_insight')
                 }
             
+            # 4. SCORING ENGINE: This must be OUTSIDE the 'if' block above
+            # This allows every finding to contribute to the final artifact score
             ftype = (r.get('finding_type') or "").lower()
-            
-            # Weighted Scoring Engine
-            if 'malware' in ftype: 
+            agent = (r.get('agent_name') or "").lower()
+
+            # Aggressive Scoring: Memory and Registry are now High Risk (+10)
+            if 'malware' in ftype or 'malware' in agent or 'intel' in agent:
                 artifacts[path]['known_bad'] = True
                 artifacts[path]['score'] += 10
-            elif 'memory' in ftype: artifacts[path]['score'] += 9
-            elif 'registry' in ftype: artifacts[path]['score'] += 8
-            elif 'mismatch' in ftype: artifacts[path]['score'] += 7
-            elif 'browser' in ftype: artifacts[path]['score'] += 6
-            elif 'keyword' in ftype: artifacts[path]['score'] += 5
-            elif 'suspicious timeline' in ftype: artifacts[path]['score'] += 4
+            elif 'memory' in ftype or 'memory' in agent: 
+                artifacts[path]['score'] += 8  
+            elif 'registry' in ftype or 'registry' in agent: 
+                artifacts[path]['score'] += 9  
+            elif 'mismatch' in ftype or 'sign' in agent: 
+                artifacts[path]['score'] += 7
+            elif 'browser' in ftype or 'browser' in agent: 
+                artifacts[path]['score'] += 5
+            elif 'keyword' in ftype or 'hash' in agent: 
+                artifacts[path]['score'] += 5
+            elif 'timeline' in ftype or 'time' in agent: 
+                artifacts[path]['score'] += 4
             
+            # 5. Append the finding description to the artifact's list
             artifacts[path]['findings'].append(f"[{r.get('agent_name')}] {r.get('description')}")
             
+        # 6. Return the aggregated data to the dashboard
         return jsonify({
             "investigation_id": inv_id, 
             "merkle_root": merkle_root,
             "artifacts": list(artifacts.values())
         })
+        
     except Exception as e:
+        print(f"[!] API Error in get_latest_report: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/findings/latest')
