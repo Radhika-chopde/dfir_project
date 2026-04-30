@@ -1,13 +1,6 @@
 import ollama
 import psycopg2
-
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
+from config import DB_CONFIG
 
 def get_ai_insight(file_path, findings_list):
     if not findings_list:

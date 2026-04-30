@@ -3,7 +3,8 @@ import os
 import requests
 import time
 import psycopg2
-import merkle_utils 
+import merkle_utils
+from config import DB_CONFIG 
 
 # --- AGENT MICROSERVICE ENDPOINTS ---
 HASH_AGENT_URL = "http://127.0.0.1:5001/analyze_file"
@@ -15,13 +16,6 @@ REGISTRY_AGENT_URL = "http://127.0.0.1:5006/scan_registry"
 BROWSER_AGENT_URL = "http://127.0.0.1:5007/scan_browser"
 MEMORY_AGENT_URL = "http://127.0.0.1:5008/scan_memory" 
 
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
 
 def call_agent(url, payload, agent_name, retries=3, delay=2):
     """Helper function to communicate with the Flask microservice agents."""

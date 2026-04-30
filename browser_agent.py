@@ -1,160 +1,181 @@
-import os
-import sqlite3
-import shutil
-import psycopg2
-import re
-import math
+import os, re, math, sqlite3, shutil, pathlib
 from flask import Flask, request, jsonify
+from db_utils import save_to_db
 
 app = Flask(__name__)
 
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
-
-# --- REFINED REPUTATION HEURISTICS ---
-
 SAFE_INFRASTRUCTURE = [
     r".*\.google\.com$", r".*\.microsoft\.com$", r".*\.amazonaws\.com$",
-    r".*\.cloudfront\.net$", r".*\.akamaihd\.net$", r".*\.gstatic\.com$",
-    r".*\.apple\.com$", r".*\.windowsupdate\.com$", r".*\.github\.com$"
+    r".*\.cloudfront\.net$", r".*\.gstatic\.com$", r".*\.apple\.com$",
+    r".*\.windowsupdate\.com$", r".*\.github\.com$", r".*\.office\.com$",
 ]
-
-TLD_REPUTATION = {
-    "high_trust": [".gov", ".edu", ".mil", ".int"],
-    "suspicious": [".onion", ".pw", ".bid", ".cc", ".icu", ".top", ".xyz", ".to"],
-    "critical_risk": [".zip", ".mov", ".sh"] 
+TLD_SUSPICIOUS = [".onion", ".pw", ".bid", ".cc", ".icu", ".top", ".xyz", ".to"]
+TLD_CRITICAL   = [".zip", ".mov", ".sh"]
+RISK_FACTORS   = {
+    "Data_Exfiltration": (r"(temp-mail|transfer\.sh|mega\.nz/file/|anonfiles\.com|sendspace\.com)", 5),
+    "C2_Indicators":     (r"(clk\.php|click\.php\?|/[a-z0-9]{12,}\.php$)", 4),
+    "Anonymization":     (r"(torproject|protonvpn|mullvad|nordvpn|tunnelbear)", 4),
+    "Piracy_Source":     (r"(torrent|crack|keygen|hianime|fmovies|anikai)", 4),
 }
 
-RISK_FACTORS = {
-    "Data_Exfiltration": {
-        "pattern": r"(temp-mail|transfer\.sh|mega\.nz/file/|mediafire\.com/file/|dropbox\.com/s/|anonfiles\.com|sendspace\.com)", 
-        "weight": 5
-    },
-    "C2_Indicators": {
-        "pattern": r"(adsterra|popads|pophost|clk\.php|click\.php\?|/[a-z0-9]{12,}\.php)", 
-        "weight": 4
-    },
-    "Anonymization": {
-        "pattern": r"(torproject|protonvpn|mullvad|nordvpn|tunnelbear|bridge/index\.html)", 
-        "weight": 4
-    },
-    "Piracy_Source": {
-        "pattern": r"(anime|watch|stream|torrent|crack|keygen|movie|free|hianime)", 
-        "weight": 3
-    }
-}
+def get_browser_history_paths():
+    """Returns all discovered browser history DB paths across browsers and profiles."""
+    paths = []
+    username = os.getlogin()
+    base = pathlib.Path(f"C:/Users/{username}/AppData/Local")
+
+    # Chrome — all profiles
+    chrome_base = base / "Google/Chrome/User Data"
+    if chrome_base.exists():
+        for profile_dir in chrome_base.iterdir():
+            h = profile_dir / "History"
+            if h.exists():
+                paths.append(("Chrome", str(profile_dir.name), str(h)))
+
+    # Edge — all profiles
+    edge_base = base / "Microsoft/Edge/User Data"
+    if edge_base.exists():
+        for profile_dir in edge_base.iterdir():
+            h = profile_dir / "History"
+            if h.exists():
+                paths.append(("Edge", str(profile_dir.name), str(h)))
+
+    # Firefox — all profiles
+    ff_base = pathlib.Path(f"C:/Users/{username}/AppData/Roaming/Mozilla/Firefox/Profiles")
+    if ff_base.exists():
+        for profile_dir in ff_base.iterdir():
+            h = profile_dir / "places.sqlite"
+            if h.exists():
+                paths.append(("Firefox", str(profile_dir.name), str(h)))
+
+    return paths
+
+def safe_copy_sqlite(src, dest):
+    """Uses the SQLite backup API to copy a potentially locked database."""
+    try:
+        src_conn  = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        dest_conn = sqlite3.connect(dest)
+        src_conn.backup(dest_conn)
+        src_conn.close()
+        dest_conn.close()
+        return True
+    except Exception as e:
+        print(f"[BrowserAgent] Could not copy {src}: {e}")
+        return False
+
+def extract_hostname(domain):
+    """
+    Strips www. prefix and TLD suffix before entropy calculation.
+    We want to measure entropy of just the meaningful part:
+    'www.kimi.com'        → 'kimi'
+    'a7x9kp2mq.top'      → 'a7x9kp2mq'
+    'subdomain.evil.xyz'  → 'subdomain.evil'
+    """
+    # Strip www. prefix
+    if domain.startswith("www."):
+        domain = domain[4:]
+
+    # Strip the TLD (last part after final dot)
+    parts = domain.rsplit(".", 1)
+    if len(parts) == 2:
+        domain = parts[0]   # 'kimi.com' → 'kimi', 'evil.xyz' → 'evil'
+
+    return domain
+
 
 def calculate_entropy(domain):
-    if not domain: return 0
-    prob = [float(domain.count(c)) / len(domain) for c in dict.fromkeys(list(domain))]
-    entropy = - sum([p * math.log(p) / math.log(2.0) for p in prob])
-    return entropy
+    if not domain:
+        return 0
+    prob = [float(domain.count(c)) / len(domain) for c in set(domain)]
+    return -sum(p * math.log(p, 2) for p in prob if p > 0)
+
 
 def calculate_url_risk(url, visit_count):
-    score = 0
-    reasons = []
+    score    = 0
+    reasons  = []
     url_lower = url.lower()
-    
-    # IMPROVED: More robust domain extraction
-    domain = url_lower.split('://')[-1].split('/')[0].split('?')[0]
+    domain   = url_lower.split('://')[-1].split('/')[0].split('?')[0].split(':')[0]
 
-    # 1. Infrastructure Trust Check
-    if any(re.match(pattern, domain) for pattern in SAFE_INFRASTRUCTURE):
+    if any(re.match(p, domain) for p in SAFE_INFRASTRUCTURE):
         return 0, []
 
-    # 2. IP Host Detection
     if re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", domain):
-        if not (domain.startswith("127.") or domain.startswith("192.168.") or domain.startswith("10.")):
+        if not any(domain.startswith(p) for p in ["127.", "192.168.", "10.", "172.16."]):
             score += 5
-            reasons.append("Direct Public IP Access")
+            reasons.append("Direct public IP access")
 
-    # 3. Behavioral Pattern Matching
-    for category, info in RISK_FACTORS.items():
-        if re.search(info["pattern"], url_lower):
-            score += info["weight"]
+    for category, (pattern, weight) in RISK_FACTORS.items():
+        if re.search(pattern, url_lower):
+            score += weight
             reasons.append(category.replace("_", " "))
 
-    # 4. TLD Reputation Analysis
-    if any(domain.endswith(tld) for tld in TLD_REPUTATION["suspicious"]):
+    if any(domain.endswith(t) for t in TLD_SUSPICIOUS):
         score += 3
-        reasons.append("Low-Reputation TLD")
-    elif any(domain.endswith(tld) for tld in TLD_REPUTATION["critical_risk"]):
+        reasons.append("Low-reputation TLD")
+    elif any(domain.endswith(t) for t in TLD_CRITICAL):
         score += 6
-        reasons.append("High-Risk TLD")
+        reasons.append("High-risk TLD")
 
-    # 5. DGA Detection
-    entropy_score = calculate_entropy(domain)
-    if entropy_score > 4.2 and len(domain) > 12:
+    # ── DGA detection on the CLEAN hostname only ──────────────────────
+    clean_host = extract_hostname(domain)   # strip www. and TLD first
+    entropy    = calculate_entropy(clean_host)
+
+    # Raised threshold: 3.5 on clean hostname AND minimum length of 8
+    # Real DGA names: 'a7x9kp2mq' scores ~3.17, 'k3xm9pla2f' scores ~3.32
+    # Real words:     'google' scores 2.58, 'kimi' scores 1.5
+    if entropy > 4.2 and len(clean_host) >= 8:
         score += 4
-        reasons.append("High Entropy Domain")
+        reasons.append(f"High-entropy domain ({entropy:.2f})")
+    # ──────────────────────────────────────────────────────────────────
 
-    # 6. Trust over Time
     if score > 0 and visit_count > 30:
-        score -= 3
-        reasons.append("Habitual Trust")
+        score -= 2
+        reasons.append("Habitual visit (trust discount)")
     elif score > 0 and visit_count < 2:
         score += 2
-        reasons.append("New Domain Visit")
-
-    # DEBUG PRINT: Check your terminal to see why sites are/aren't flagging
-    if score > 2:
-        print(f"[DEBUG] Analyzing: {domain} | Score: {score} | Reasons: {reasons}")
+        reasons.append("First-time domain visit")
 
     return score, reasons
 
-def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        sql = "INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) VALUES (%s, %s, %s, %s, %s);"
-        cur.execute(sql, (agent_name, finding_type, description, investigation_id, file_path))
-        conn.commit()
-        cur.close()
-    except Exception as e: print(f"DB Error: {e}")
-    finally:
-        if conn: conn.close()
-
 @app.route('/scan_browser', methods=['POST'])
 def scan_browser():
-    data = request.get_json()
+    data             = request.get_json()
     investigation_id = data.get('investigation_id')
-    username = os.getlogin()
-    history_path = f"C:\\Users\\{username}\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\History"
-    
-    if not os.path.exists(history_path):
-        return jsonify({"message": "History file not found"}), 200
+    findings_count   = 0
+    history_paths    = get_browser_history_paths()
 
-    findings_count = 0
-    temp_history = f"history_{investigation_id}.db"
-    
-    try:
-        shutil.copy2(history_path, temp_history)
-        conn = sqlite3.connect(temp_history)
-        cursor = conn.cursor()
-        # Increased limit and pulled more data for analysis
-        cursor.execute("SELECT url, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT 500")
-        rows = cursor.fetchall()
-        
-        for url, visit_count in rows:
-            risk_score, reasons = calculate_url_risk(url, visit_count)
-            # Threshold lowered to 5 to be slightly more aggressive
-            if risk_score >= 5:
-                description = f"Risk Score {risk_score}: {', '.join(reasons)}. URL: {url[:80]}..."
-                save_to_db("BrowserAgent", "Heuristic Web Alert", description, investigation_id, "Chrome History")
-                findings_count += 1
-        
-        conn.close()
-        os.remove(temp_history)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    if not history_paths:
+        return jsonify({"message": "No browser history files found"}), 200
+
+    for browser, profile, history_path in history_paths:
+        temp_db = f"history_{investigation_id}_{browser}_{profile}.db"
+        if not safe_copy_sqlite(history_path, temp_db):
+            continue
+
+        try:
+            conn = sqlite3.connect(temp_db)
+            cur  = conn.cursor()
+
+            if browser == "Firefox":
+                cur.execute("SELECT url, visit_count FROM moz_places ORDER BY last_visit_date DESC LIMIT 500")
+            else:
+                cur.execute("SELECT url, visit_count FROM urls ORDER BY last_visit_time DESC LIMIT 500")
+
+            for url, visit_count in cur.fetchall():
+                risk_score, reasons = calculate_url_risk(url or "", visit_count or 0)
+                if risk_score >= 6:
+                    desc = f"[{browser}/{profile}] Risk {risk_score}: {', '.join(reasons)}. URL: {url[:80]}"
+                    save_to_db("BrowserAgent", "Heuristic Web Alert", desc, investigation_id, f"{browser} History")
+                    findings_count += 1
+
+            conn.close()
+        except Exception as e:
+            print(f"[BrowserAgent] Error scanning {browser}/{profile}: {e}")
+        finally:
+            if os.path.exists(temp_db):
+                os.remove(temp_db)
 
     return jsonify({"status": "complete", "matches_found": findings_count})
 
 if __name__ == '__main__':
-    app.run(port=5007, debug=True)
+    app.run(port=5007, debug=False)

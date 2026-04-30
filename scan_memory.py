@@ -3,16 +3,11 @@ import os
 import psycopg2
 import hashlib
 from flask import Flask, request, jsonify
+from config import DB_CONFIG
+from db_utils import save_to_db
 
 app = Flask(__name__)
 
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
 
 def get_process_hash(pid):
     """Attempts to hash the executable of a running process."""
@@ -30,76 +25,88 @@ def get_process_hash(pid):
         return None
 
 def analyze_memory():
-    """
-    Scans live RAM with improved filtering to eliminate system False Positives.
-    """
     findings = []
-    # CORE SYSTEM PIDs: 0 (Idle), 4 (System). These never have standard EXE paths.
-    CORE_SYSTEM_PIDS = [0, 4]
-    
-    for proc in psutil.process_iter(['pid', 'name', 'exe', 'username', 'status']):
+    CORE_SYSTEM_PIDS = {0, 4}
+
+    # Build a PID→name map first for parent-child checks
+    pid_name_map = {}
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            pid_name_map[proc.info['pid']] = (proc.info['name'] or "").lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # Suspicious parent-child pairs: child → [legitimate parents]
+    SUSPICIOUS_PARENTS = {
+        "powershell.exe": ["explorer.exe", "cmd.exe"],    # Unexpected: word.exe → powershell.exe
+        "cmd.exe":        ["explorer.exe", "powershell.exe"],
+        "wscript.exe":    ["explorer.exe"],
+        "mshta.exe":      ["explorer.exe"],
+    }
+    EXPECTED_PARENTS = {
+        "svchost.exe":  ["services.exe"],
+        "lsass.exe":    ["wininit.exe"],
+        "csrss.exe":    ["smss.exe"],
+        "wininit.exe":  ["smss.exe"],
+    }
+
+    for proc in psutil.process_iter(['pid', 'name', 'exe', 'username', 'status', 'ppid']):
         try:
             pinfo = proc.info
-            pid = pinfo['pid']
-            
-            # 1. WHITELIST: Ignore core kernel processes that trigger "Ghost Process" flags
+            pid   = pinfo['pid']
             if pid in CORE_SYSTEM_PIDS:
                 continue
-                
-            name = (pinfo['name'] or "").lower()
-            exe = (pinfo['exe'] or "").lower()
-            
-            score = 0
+
+            name   = (pinfo['name'] or "").lower()
+            exe    = (pinfo['exe']  or "").lower()
+            ppid   = pinfo.get('ppid', 0)
+            parent_name = pid_name_map.get(ppid, "unknown")
+
+            score   = 0
             reasons = []
 
-            # 2. Path Anomaly (Running from Temp/AppData)
-            if any(path in exe for path in ["\\temp\\", "\\appdata\\local\\temp", "\\users\\public"]):
-                # Lower risk if the process name clearly indicates an installer/updater
+            # Path anomaly
+            if any(p in exe for p in ["\\temp\\", "\\appdata\\local\\temp", "\\users\\public"]):
                 if "setup" not in name and "update" not in name:
                     score += 7
-                    reasons.append("Process executing from volatile user-writable directory")
+                    reasons.append("Executing from user-writable directory")
 
-            # 3. Masquerading (e.g. svchost.exe NOT in system32)
+            # Masquerade
             system_names = ["svchost.exe", "lsass.exe", "wininit.exe", "csrss.exe"]
             if any(s in name for s in system_names):
                 if exe and "system32" not in exe and "syswow64" not in exe:
                     score += 9
-                    reasons.append("Critical: System process masquerading detected (path mismatch)")
+                    reasons.append("System process masquerading (wrong path)")
 
-            # 4. Ghost Process Logic (Refined)
-            # Only flag if it's NOT a kernel process and truly has no executable path
+            # Ghost process
             if not exe and pinfo['status'] == 'running':
-                # Note: Some system services may deny access to non-admin users, 
-                # appearing as 'no exe'. We flag this but with context.
                 score += 8
-                reasons.append("Ghost Process: In-memory execution without accessible disk-binary")
+                reasons.append("Ghost process: no disk-binary accessible")
+
+            # NEW: Suspicious parent-child relationship
+            if name in SUSPICIOUS_PARENTS:
+                allowed = SUSPICIOUS_PARENTS[name]
+                if parent_name not in allowed and parent_name != "unknown":
+                    score += 6
+                    reasons.append(f"Suspicious parent: {parent_name} → {name}")
+
+            if name in EXPECTED_PARENTS:
+                expected = EXPECTED_PARENTS[name]
+                if parent_name not in expected:
+                    score += 8
+                    reasons.append(f"Critical parent mismatch: {parent_name} → {name} (expected {expected[0]})")
 
             if score >= 6:
                 findings.append({
-                    "pid": pid,
-                    "name": name,
-                    "score": score,
-                    "reasons": reasons,
-                    "exe": exe,
+                    "pid": pid, "name": name, "score": score,
+                    "reasons": reasons, "exe": exe,
+                    "parent": parent_name,
                     "hash": get_process_hash(pid)
                 })
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    return findings
 
-def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        sql = "INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) VALUES (%s, %s, %s, %s, %s);"
-        cur.execute(sql, (agent_name, finding_type, description, investigation_id, file_path))
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        print(f"Memory Agent DB Error: {e}")
-    finally:
-        if conn is not None: conn.close()
+    return findings
 
 @app.route('/scan_memory', methods=['POST'])
 def scan_memory():
@@ -116,4 +123,4 @@ def scan_memory():
     return jsonify({"status": "complete", "matches_found": len(memory_hits)})
 
 if __name__ == '__main__':
-    app.run(port=5008, debug=True)
+    app.run(port=5008, debug=False)

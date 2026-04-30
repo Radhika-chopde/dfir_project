@@ -2,23 +2,27 @@ import os
 import psycopg2
 import math
 from flask import Flask, request, jsonify
+from config import DB_CONFIG
+from db_utils import save_to_db
 
 app = Flask(__name__)
 
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
 
 MAGIC_NUMBERS = {
-    "ffd8ffe0": "JPEG",
+    "ffd8ffe0": "JPEG", "ffd8ffe1": "JPEG", "ffd8ffe2": "JPEG",
     "89504e47": "PNG",
     "25504446": "PDF",
-    "504b0304": "ZIP",
-    "4d5a": "EXE/DLL"
+    "504b0304": "ZIP/Office",
+    "504b0506": "ZIP/Office",
+    "4d5a":     "EXE/DLL",
+    "52617221": "RAR",
+    "377abcaf": "7-ZIP",
+    "7f454c46": "ELF",          # Linux executable
+    "d0cf11e0": "OLE2/Office",  # Legacy .doc, .xls, .ppt
+    "4c000000": "LNK Shortcut", # .lnk files — often malicious
+    "4d534346": "CAB Archive",
+    "cafebabe": "Java CLASS",
+    "1f8b08":   "GZIP",
 }
 
 EXECUTABLE_EXTENSIONS = ['.exe', '.dll', '.com', '.msi', '.scr', '.cpl']
@@ -62,24 +66,6 @@ def calculate_entropy(file_path):
         print(f"Entropy Calculation Error: {e}")
         return 0
     
-def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        sql = """
-            INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) 
-            VALUES (%s, %s, %s, %s, %s);
-        """
-        cur.execute(sql, (agent_name, finding_type, description, investigation_id, file_path))
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        print(f"Database error: {e}")
-    finally:
-        if conn is not None:
-            conn.close()
-
 @app.route('/verify_signature', methods=['POST'])
 def verify_signature_endpoint():
     data = request.get_json()
@@ -92,34 +78,50 @@ def verify_signature_endpoint():
     
     detected_type = verify_signature(file_path)
     
-    if detected_type is None:
-        return jsonify({"error": "File not found"}), 404
-    if detected_type == "Error":
-        return jsonify({"error": "Error reading file"}), 500
+    if detected_type is None: return jsonify({"error": "File not found"}), 404
+    if detected_type == "Error": return jsonify({"error": "Error reading file"}), 500
 
-    # --- NOVELTY FEATURE: Obfuscation Detection ---
+    # --- 1. Obfuscation Detection (Entropy) ---
     entropy_val = calculate_entropy(file_path)
     if entropy_val > 7.5: 
-        obs_desc = f"High Entropy Detected ({entropy_val:.2f}). File is likely encrypted or packed to evade detection."
+        obs_desc = f"High Entropy Detected ({entropy_val:.2f}). File is likely encrypted or packed."
         save_to_db("Signature Agent", "Obfuscation Alert", obs_desc, investigation_id, file_path)
 
-    # --- Standard Signature Mismatch Logic ---
+    # --- 2. Advanced Signature Mismatch Logic ---
+    # Mapping detected_type to allowed extensions
+    TYPE_TO_EXTENSIONS = {
+        "JPEG":        ['.jpg', '.jpeg'],
+        "PNG":         ['.png'],
+        "PDF":         ['.pdf'],
+        "ZIP/Office":  ['.zip', '.docx', '.xlsx', '.pptx', '.jar'],
+        "EXE/DLL":     ['.exe', '.dll', '.scr', '.com', '.sys', '.efi'],
+        "RAR":         ['.rar'],
+        "7-ZIP":       ['.7z'],
+        "ELF":         ['', '.bin', '.elf', '.so'], # Linux binaries often have no extension
+        "OLE2/Office": ['.doc', '.xls', '.ppt', '.msi'],
+        "LNK Shortcut":['.lnk'],
+        "CAB Archive": ['.cab'],
+        "Java CLASS":  ['.class'],
+        "GZIP":        ['.gz', '.tgz'],
+        "TXT":         ['.txt', '.log', '.ini', '.conf', '.py', '.js', '.php']
+    }
+
     is_mismatch = False
     mismatch_desc = ""
 
-    if (detected_type == "JPEG" and file_extension not in ['.jpeg','.jpg']) or \
-       (detected_type == 'PNG' and file_extension != '.png') or \
-       (detected_type == 'PDF' and file_extension != '.pdf') or \
-       (detected_type == 'ZIP' and file_extension not in ['.zip', '.docx', '.xlsx', '.pptx']) or \
-       (detected_type == 'EXE/DLL' and file_extension not in ['.exe', '.dll', '.scr', '.com']):
-        
-        is_mismatch = True
-        mismatch_desc = f"File Signature Mismatch! File '{file_path}' has extension '{file_extension}' but is detected as a '{detected_type}' file."
+    # Check if we have a mapping for this detected type
+    if detected_type in TYPE_TO_EXTENSIONS:
+        allowed_extensions = TYPE_TO_EXTENSIONS[detected_type]
+        if file_extension not in allowed_extensions:
+            is_mismatch = True
+            mismatch_desc = f"Signature Mismatch! File header is '{detected_type}' but extension is '{file_extension}'."
 
-    elif detected_type in ["TXT", "Unknown"] and file_extension in EXECUTABLE_EXTENSIONS:
+    # Special case: Executable extension with no/unknown signature (Classic Malware Tactic)
+    elif file_extension in EXECUTABLE_EXTENSIONS and detected_type in ["Unknown", "TXT"]:
         is_mismatch = True
-        mismatch_desc = f"File Signature Mismatch! File '{file_path}' has an executable extension '{file_extension}' but its signature is '{detected_type}'."
-    
+        mismatch_desc = f"Security Alert! File has executable extension '{file_extension}' but detected as '{detected_type}'."
+
+    # --- 3. Save Findings ---
     if is_mismatch:
         save_to_db(
             agent_name="Signature Agent",
@@ -129,15 +131,12 @@ def verify_signature_endpoint():
             file_path=file_path
         )
 
-    return jsonify(
-        {
-            "file": file_path,
-            "extension": file_extension,
-            "detected_type": detected_type,
-            "entropy": round(entropy_val, 2),
-            "mismatch_found": is_mismatch
-        }
-    ), 200
-
+    return jsonify({
+        "file": file_path,
+        "extension": file_extension,
+        "detected_type": detected_type,
+        "entropy": round(entropy_val, 2),
+        "mismatch_found": is_mismatch
+    }), 200
 if __name__ == '__main__':
-    app.run(port=5003, debug=True)
+    app.run(port=5003, debug=False)

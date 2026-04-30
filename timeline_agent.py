@@ -1,106 +1,63 @@
-import os
-import psycopg2
+import os, sys, datetime
 from flask import Flask, request, jsonify
-import datetime
+from db_utils import save_to_db
 
 app = Flask(__name__)
-
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
 
 def get_timelines(file_path):
     try:
         stat = os.stat(file_path)
-        creation_time = stat.st_ctime
-        modification_time = stat.st_mtime
-        access_time = stat.st_atime
-
-        time = {
-            "creation_time_ts": creation_time,
-            "modification_time_ts": modification_time,
-            "access_time_ts": access_time,
-            "creation_time_str": datetime.datetime.fromtimestamp(creation_time).strftime("%Y-%m-%d %H:%M:%S"),
-            "modification_time_str": datetime.datetime.fromtimestamp(modification_time).strftime("%Y-%m-%d %H:%M:%S"),
-            "access_time_str": datetime.datetime.fromtimestamp(access_time).strftime("%Y-%m-%d %H:%M:%S")
+        # st_ctime is CREATION TIME on Windows, INODE CHANGE TIME on Linux/Mac
+        is_windows = sys.platform == 'win32'
+        return {
+            "mtime": stat.st_mtime,
+            "atime": stat.st_atime,
+            "ctime": stat.st_ctime,
+            "ctime_meaning": "creation" if is_windows else "inode_change",
+            "mtime_str": datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "atime_str": datetime.datetime.fromtimestamp(stat.st_atime).strftime("%Y-%m-%d %H:%M:%S"),
+            "ctime_str": datetime.datetime.fromtimestamp(stat.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
         }
-        return time
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        print(f"Error getting timestamp for file: {e}")
+    except (FileNotFoundError, PermissionError):
         return None
 
-def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        sql = """
-            INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) 
-            VALUES (%s, %s, %s, %s, %s);
-        """
-        cur.execute(sql,(agent_name, finding_type, description, investigation_id, file_path))
-        conn.commit()
-        conn.close()
-        print("Successfully saved findings to the database.")
-    except Exception as e:
-        print(f"Database error: {e}")
-        return None
-    finally:
-        if conn is not None:
-            conn.close()
-
-@app.route('/get_timestamps',methods=['POST'])
+@app.route('/get_timestamps', methods=['POST'])
 def get_timestamps_endpoint():
-    data = request.get_json()
-    if not data or 'file_path' not in data or 'investigation_id' not in data:
-        return jsonify({'error': "Missing 'file_path' or 'investigation_id'"}), 400
-        
-    file_path = data['file_path']
-    investigation_id = data['investigation_id']
-    timelines = get_timelines(file_path)
-    
-    if timelines is None:
-        return jsonify({"error": "File not found"}), 404
+    data             = request.get_json()
+    file_path        = data.get('file_path')
+    investigation_id = data.get('investigation_id')
+
+    if not file_path or not investigation_id:
+        return jsonify({'error': "Missing file_path or investigation_id"}), 400
+
+    ts = get_timelines(file_path)
+    if ts is None:
+        return jsonify({"error": "File not found or permission denied"}), 404
 
     is_suspicious = False
-    description = ""
-    if timelines['modification_time_ts'] < timelines['creation_time_ts']:
-        is_suspicious = True
-        description = (
-            f"Suspicious Timeline! File: {file_path}. "
-            f"Modification Time ({timelines['modification_time_str']}) is OLDER than Creation Time ({timelines['creation_time_str']})."
-        )
-        save_to_db(
-            agent_name='Timeline Agent', 
-            finding_type='Suspicious Timeline', 
-            description=description, 
-            investigation_id=investigation_id,
-            file_path=file_path
-        )
-    else:
-        description = (
-            f"File: {file_path}, Creation Time: {timelines['creation_time_str']}, "
-            f"Modification Time: {timelines['modification_time_str']}, Access Time: {timelines['access_time_str']}"
-        )
-        save_to_db(
-            agent_name='Timeline Agent', 
-            finding_type='File modification timelines', 
-            description=description, 
-            investigation_id=investigation_id,
-            file_path=file_path
-        )
 
+    # Only flag mtime < ctime anomaly on Windows where ctime = creation time
+    if sys.platform == 'win32' and ts['mtime'] < ts['ctime']:
+        is_suspicious = True
+        # Explicitly mentioning the risk score helps the AI Analyst later
+        desc = (
+            f"Risk 8/10: Timestomping Detected. mtime ({ts['mtime_str']}) is OLDER than "
+            f"ctime ({ts['ctime_str']}). File: {file_path}"
+        )
+        save_to_db("TimelineAgent", "Timestamp Anomaly", desc, investigation_id, file_path)
+
+    # Flag if accessed very recently but not modified (possible staging/reconnaissance)
+    now = datetime.datetime.now().timestamp()
+    if (now - ts['atime']) < 3600 and (now - ts['mtime']) > 86400:
+        is_suspicious = True
+        desc = f"Recent Access on Old File: accessed within last hour but not modified in >24h. File: {file_path}"
+        save_to_db("TimelineAgent", "Recent Access Anomaly", desc, investigation_id, file_path)
+
+    # ONLY log clean files as a summarized batch, not one record per file
     return jsonify({
-        "message": "Timelines found successfully", 
-        "is_suspicious": is_suspicious, 
-        "timelines": timelines
+        "is_suspicious": is_suspicious,
+        "timelines": ts
     }), 200
 
 if __name__ == '__main__':
-    app.run(port=5004, debug=True)
+    app.run(port=5004, debug=False)

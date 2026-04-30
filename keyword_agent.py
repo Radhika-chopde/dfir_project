@@ -2,24 +2,17 @@ import os
 import psycopg2
 import re
 from flask import Flask, request, jsonify
+from config import DB_CONFIG
+from db_utils import save_to_db
 
 app = Flask(__name__)
 
-DB_CONFIG = {
-    "dbname": "dfir_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost",
-    "port": "5432"
-}
-
-# --- ADVANCED FORENSIC KEYWORD LIBRARY ---
-# Categorized patterns used to identify malicious intent or sensitive data exposure.
-# Using Regex allows us to catch patterns (like SSNs) rather than just static words.
 FORENSIC_LIBRARY = {
     "PII_Confidential": [
         r"\b\d{3}-\d{2}-\d{4}\b",                             # Social Security Numbers
         r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", # Email addresses
+        r"\b4[0-9]{12}(?:[0-9]{3})?\b",                     # Visa card numbers
+        r"\b5[1-5][0-9]{14}\b",
         r"(?i)(password|secret|confidential|private_key|ssh-rsa|access_token)"
     ],
     "WebShell_Hacking": [
@@ -35,70 +28,40 @@ FORENSIC_LIBRARY = {
 }
 
 def search_forensic_patterns(file_path, custom_keywords=None):
-    """
-    Scans a file using the high-level forensic library 
-    and optional user-defined keywords.
-    """
     found_hits = []
-    
-    # 1. Prepare patterns
     all_patterns = []
     for category, patterns in FORENSIC_LIBRARY.items():
         for p in patterns:
             all_patterns.append((category, p))
-    
-    # Add any extra keywords provided by the controller
     if custom_keywords:
         for k in custom_keywords:
             all_patterns.append(("User Defined", re.escape(k)))
 
     try:
-        # Read as bytes to prevent crashing on non-UTF-8 binary data
         with open(file_path, 'rb') as f:
-            # Read first 2MB to maintain performance during rapid triage
             raw_data = f.read(2 * 1024 * 1024)
             content = raw_data.decode('utf-8', errors='ignore')
-            
-            for category, pattern in all_patterns:
-                matches = re.finditer(pattern, content)
-                for match in matches:
-                    # Capture 20 chars of context for the investigator
-                    start = max(0, match.start() - 20)
-                    end = min(len(content), match.end() + 20)
-                    context = content[start:end].replace('\n', ' ').strip()
-                    
-                    found_hits.append({
-                        "category": category,
-                        "match": match.group(),
-                        "context": f"...{context}..."
-                    })
-                    
-                    # Limit to 10 hits per file to avoid database bloat
-                    if len(found_hits) >= 10:
-                        return found_hits
-                        
+
+        for category, pattern in all_patterns:
+            cat_hits = 0
+            for match in re.finditer(pattern, content):
+                start = max(0, match.start() - 20)
+                end   = min(len(content), match.end() + 20)
+                context = content[start:end].replace('\n', ' ').strip()
+                found_hits.append({
+                    "category": category,
+                    "match":    match.group(),
+                    "context":  f"...{context}..."
+                })
+                cat_hits += 1
+                if cat_hits >= 5:   # cap per-pattern, not per-file
+                    break
+
     except Exception as e:
         print(f"Error scanning {file_path}: {e}")
-        return []
-        
+
     return found_hits
 
-def save_to_db(agent_name, finding_type, description, investigation_id, file_path):
-    conn = None
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        sql = """
-            INSERT INTO findings (agent_name, finding_type, description, investigation_id, file_path) 
-            VALUES (%s, %s, %s, %s, %s);
-        """
-        cur.execute(sql, (agent_name, finding_type, description, investigation_id, file_path))
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        print(f"Database error: {e}")
-    finally:
-        if conn: conn.close()
 
 @app.route('/search_keywords', methods=['POST'])
 def search_keywords_endpoint():
@@ -139,4 +102,4 @@ def search_keywords_endpoint():
         return jsonify({"message": "No forensic patterns detected", "file": file_path, "matches_found": 0}), 200
 
 if __name__ == '__main__':
-    app.run(port=5002, debug=True)
+    app.run(port=5002, debug=False)
